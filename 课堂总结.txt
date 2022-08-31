@@ -1,0 +1,272 @@
+
+判断是否自己的锁，如果是自己的锁，执行删除操作。
+if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end
+
+if redis.call('get', KEYS[1]) == ARGV[1]
+then
+	return redis.call('del', KEYS[1])
+else 
+	return 0
+end
+
+key: lock 
+arg: uuid
+
+可重入锁加锁流程：ReentrantLock.lock() --> NonfairSync.lock() --> AQS.acquire(1) --> NonfairSync.tryAcquire(1) --> Sync.nonfairTryAcquire(1)
+	1.CAS获取锁，如果没有线程占用锁（state==0），加锁成功并记录当前线程是有锁线程(两次)
+	2.如果state的值不为0，说明锁已经被占用。则判断当前线程是否是有锁线程，如果是则重入（state + 1）
+	3.否则加锁失败，入队等待
+	
+可重入锁解锁流程：ReentrantLock.unlock() --> AQS.release(1) --> Sync.tryRelease(1)
+	1.判断当前线程是否是有锁线程，不是则抛出异常
+	2.对state的值减1之后，判断state的值是否为0，为0则解锁成功，返回true
+	3.如果减1后的值不为0，则返回false
+	
+参照ReentrantLock中的非公平可重入锁实现分布式可重入锁：hash + lua脚本
+	加锁：
+		1.判断锁是否存在（exists），则直接获取锁 hset key field value
+		2.如果锁存在则判断是否自己的锁（hexists），如果是自己的锁则重入：hincrby key field increment
+		3.否则重试：递归 循环
+		
+		if redis.call('exists', KEYS[1]) == 0 or redis.call('hexists', KEYS[1], ARGV[1]) == 1 then redis.call('hincrby', KEYS[1], ARGV[1], 1) redis.call('expire', KEYS[1], ARGV[2]) return 1 else return 0 end
+		
+		if redis.call('exists', KEYS[1]) == 0 or redis.call('hexists', KEYS[1], ARGV[1]) == 1
+		then
+			redis.call('hincrby', KEYS[1], ARGV[1], 1)
+			redis.call('expire', KEYS[1], ARGV[2])
+			return 1
+		else 
+			return 0
+		end
+		
+		key: lock
+		arg: uuid 30
+	
+	解锁：
+		1.判断自己的锁是否存在（hexists），不存在则返回nil
+		2.如果自己的锁存在，则减1（hincrby -1），判断减1后的值是否为0，为0则释放锁（del）并返回1 
+		3.不为0，返回0
+		
+		if redis.call('hexists', KEYS[1], ARGV[1]) == 0 then return nil elseif redis.call('hincrby', KEYS[1], ARGV[1], -1) == 0 then return redis.call('del', KEYS[1]) else return 0 end
+	
+		if redis.call('hexists', KEYS[1], ARGV[1]) == 0
+		then
+			return nil
+		elseif redis.call('hincrby', KEYS[1], ARGV[1], -1) == 0
+		then 
+			return redis.call('del', KEYS[1])
+		else 
+			return 0
+		end
+
+		key: lock
+		arg: uuid
+		
+自动续期：定时任务（时间驱动 Timer定时器） + lua脚本
+	判断自己的锁是否存在（hexists），如果存在则重置过期时间
+	if redis.call('hexists', KEYS[1], ARGV[1]) == 1 then return redis.call('expire', KEYS[1], ARGV[2]) else return 0 end
+	
+	if redis.call('hexists', KEYS[1], ARGV[1]) == 1
+	then
+		return redis.call('expire', KEYS[1], ARGV[2])
+	else 
+		return 0
+	end
+	
+	key: lock
+	arg: uuid 30
+	
+基于redis实现分布式锁：
+特征：
+	1.独占排他：setnx
+	2.防死锁：
+		redis客户端程序获取到锁之后，立马宕机。给锁添加过期时间
+		不可重入：可重入 
+	3.防误删：
+		先判断是否自己的锁才能删除
+	4.原子性：
+		加锁和过期时间之间
+		判断和释放锁之间
+	5.可重入性：hash + lua脚本 
+	6.自动续期：Timer定时器 + lua脚本 
+	
+锁操作：
+	1.加锁：
+		1.setnx：独占排他   死锁、不可重入、原子性 
+		2.set k v ex 30 nx：独占排他、死锁 		不可重入 
+		3.hash + lua脚本：可重入锁
+			1.判断锁是否被占用（exists），如果没有被占用则直接获取锁（hset/hincrby）并设置过期时间（expire）
+			2.如果锁被占用，则判断是否当前线程占用的，如果是则重入（hincrby）并重置过期时间（expire）
+			3.否则获取锁失败，将来代码中重试
+		4.Timer定时器 + lua脚本：实现锁的自动续期
+	
+	2.解锁 
+		1.del：导致误删
+		2.先判断再删除同时保证原子性：lua脚本
+		3.hash + lua脚本：可重入 
+			1.判断当前线程的锁是否存在，不存在则返回nil，将来抛出异常
+			2.存在则直接减1（hincrby -1），判断减1后的值是否为0，为0则释放锁（del），并返回1
+			3.不为0，则返回0
+	
+	3.重试：递归 循环 
+	
+redisson：redis的java客户端，分布式锁
+	玩法：
+		1.引入依赖
+		2.java配置类：RedissonConfig
+			@Bean
+			public RedissonClient redissonClient(){
+				Config config = new Config();
+				config.useSingleServer().setAddress("redis://ip:port");
+				return Redisson.create(config);
+			}
+		3.代码使用：
+			可重入锁RLock对象：CompletableFuture + lua脚本 + hash
+				RLock lock = this.redissonClient.getLock("xxx");
+				lock.lock()/unlock()
+				
+			公平锁：
+				RLock lock = this.redissonClient.getFairLock("xxx");
+				lock.lock()/unlock()
+				
+			联锁 和 红锁：
+			
+			读写锁：
+				RReadWriteLock rwLock = this.redissonClient.getReadWriteLock("xxx");
+				rwLock.readLock().lock()/unlock();
+				rwLock.writeLock().lock()/unlock();
+				
+			信号量：
+				RSemaphore semaphore = this.redissonClient.getSemaphore("xxx");
+				semaphore.trySetPermits(3);
+				semaphore.acquire()/release();
+				
+			闭锁：
+				RCountDownLatch cdl = this.redissonClient.getCountDownLatch("xxx");
+				cdl.trySetCount(6);
+				cdl.await()/countDowntch();
+			
+zookeeper分布式锁：
+	1.介绍了zk
+	2.zk下载及安装
+	3.指令：
+		ls /
+		get /zookeeper 
+		create /aa "test"
+		delete /aa 
+		set /aa "test1"
+	4.znode节点类型：
+		永久节点：create /path content
+		临时节点：create -e /path content 。只要客户端程序断开链接自动删除
+		永久序列化节点：create -s /path content 
+		临时序列化节点：create -s -e /path content 
+	5.节点的事件监听：一次性
+		1.节点创建：NodeCreated
+			stat -w /xx 
+		2.节点删除：NodeDeleted
+			stat -w /xx
+		3.节点数据变化：NodeDataChanged
+			get -w /xx
+		4.子节点变化：NodeChildrenChanged
+			ls -w /xx
+	6.java客户端：官方提供 ZkClient Curator
+	
+	7.分布式锁：
+		1.独占排他：znode节点不可重复 自旋锁
+		2.阻塞锁：临时序列化节点 
+			1.所有请求要求获取锁时，给每一个请求创建临时序列化节点
+			2.获取当前节点的前置节点，如果前置节点为空，则获取锁成功，否则监听前置节点
+			3.获取锁成功之后执行业务操作，然后释放当前节点的锁
+		3.可重入：同一线程已经获取过该锁的情况下，可重入
+			1.在节点的内容中记录服务器、线程以及重入信息
+			2.ThreadLocal：线程的局部变量，线程私有
+		4.公平锁：有序列
+		
+		1.独占排他互斥使用 节点不重复
+		2.防死锁： 
+			客户端程序获取到锁之后服务器立马宕机。临时节点：一旦客户端服务器宕机，链接就会关闭，此时zk心跳检测不到客户端程序，删除对应的临时节点。
+			不可重入：可重入锁 
+		3.防误删：给每一个请求线程创建一个唯一的序列化节点。
+		4.原子性：
+			创建节点 删除节点 查询及监听 具备原子性
+		5.可重入：ThreadLocal实现 节点数据 ConcurrentHashMap
+		6.自动续期：没有过期时间 也就不需要自动续期
+		7.单点故障：zk一般都是集群部署
+		8.zk集群：偏向于一致性集群
+			
+	8.Curator：Netflix贡献给Apache
+		Curator-framework：zk的底层做了一些封装。
+		Curator-recipes：典型应用场景做了一些封装，分布式锁
+		
+		1.InterProcessMutex：类似于ReentrantLock可重入锁 分布式版本
+			public InterProcessMutex(CuratorFramework client, String path)
+			public void acquire()
+			public void release()
+		
+			InterProcessMutex
+				basePath：初始化锁时指定的节点路径
+				internals：LockInternals对象，加锁 解锁
+				ConcurrentMap<Thread, LockData> threadData：记录了重入信息
+				class LockData {
+					Thread lockPath lockCount
+				}
+				
+			
+			LockInternals
+				maxLeases：租约，值为1
+				basePath：初始化锁时指定的节点路径
+				path：basePath + "/lock-"
+				
+			加锁：InterProcessMutex.acquire() --> InterProcessMutex.internalLock() --> 	
+					LockInternals.attemptLock()
+				
+		2.InterProcessSemaphoreMutex：不可重入锁
+			
+		3.InterProcessReadWriteMutex：可重入的读写锁
+			读读可以并发的
+			读写不可以并发
+			写写不可以并发
+			写锁在释放之前会阻塞请求线程，而读锁是不会的。
+			
+		4.InterProcessMultiLock：联锁  redisson中的联锁对象
+		
+		5.InterProcessSemaphoreV2：信号量，限流
+		
+		
+		6.共享计数器：CountDownLatch
+			ShareCount
+			DistributedAtomicNumber：
+				DistributedAtomicLong
+				DistributedAtomicInteger
+				
+基于MySQL关系型数据库实现：唯一键索引
+	redis：基于Key唯一性
+	zk：基于znode节点唯一性
+	
+	思路：
+		1.加锁：INSERT INTO tb_lock(lock_name) values ('lock') 执行成功代表获取锁成功
+		2.释放锁：获取锁成功的请求执行业务操作，执行完成之后通过delete删除对应记录
+		3.重试：递归
+
+	1.独占排他互斥使用  唯一键索引 
+	2.防死锁： 
+		客户端程序获取到锁之后，客户端程序的服务器宕机。给锁记录添加一个获取锁时间列。 
+			额外的定时器检查获取锁的系统时间和当前系统时间的差值是否超过了阈值。
+		不可重入：可重入 记录服务信息 及 线程信息 重入次数
+	3.防误删： 借助于id的唯一性防止误删
+	4.原子性：一个写操作   还可以借助于mysql悲观锁
+	5.可重入：
+	6.自动续期：服务器内的定时器重置获取锁的系统时间
+	7.单机故障，搭建mysql主备
+	8.集群情况下锁机制失效问题。
+	
+	9.阻塞锁：
+
+总结：
+	1.简易程序：mysql > redis(lua脚本) > zk
+	2.性能：redis > zk > mysql 
+	3.可靠性：zk > redis = mysql 
+	追求极致性能：redis 
+	追求可靠性：zk 
+	简单玩一下，实现独占排他，对性能 对可靠性要求都不高的情况下，选择mysql分布式锁。
+

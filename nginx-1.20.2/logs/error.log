@@ -1,0 +1,2 @@
+2022/09/04 21:35:31 [emerg] 8900#22096: CreateFile() "C:\CODE\Lock_Demo01\¹¤¾ß\nginx-1.20.2/conf/nginx.conf" failed (1113: No mapping for the Unicode character exists in the target multi-byte code page)
+2022/09/04 21:36:16 [emerg] 21032#16460: unknown directive "upstrem" in C:\CODE\Lock_Demo01\nginx-1.20.2/conf/nginx.conf:34

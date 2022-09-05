@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+      <module fileurl="file://$PROJECT_DIR$/Lock/Lock.iml" filepath="$PROJECT_DIR$/Lock/Lock.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/Lock_Demo01.iml" filepath="$PROJECT_DIR$/.idea/Lock_Demo01.iml" />
+      <module fileurl="file://$PROJECT_DIR$/代码/distributed-lock/distributed-lock.iml" filepath="$PROJECT_DIR$/代码/distributed-lock/distributed-lock.iml" />
+    </modules>
+  </component>
+</project>

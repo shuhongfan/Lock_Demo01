@@ -12,7 +12,8 @@ File Encoding         : 65001
 
 Date: 2022-07-25 21:44:16
 */
-
+create database distributed_lock;
+use distributed_lock;
 SET FOREIGN_KEY_CHECKS=0;
 
 -- ----------------------------

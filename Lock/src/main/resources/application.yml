@@ -1,0 +1,9 @@
+spring:
+  datasource:
+    username: root
+    password: root
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://192.168.120.20:3306/distributed_lock?useUnicode=true&characterEncoding=utf-8&useSSL=false&serverTimezone=UTC
+  redis:
+    host: 192.168.120.20
+    port: 6379
